@@ -153,6 +153,10 @@ main{position:relative;z-index:1;display:flex;justify-content:center;padding:22p
 .fila select{padding:8px;border:2px solid #d5e4fb;border-radius:10px;font-weight:800;color:var(--navy);background:#fff}
 .fila .ops .rec{background:#fff3c4;color:#6b4a00}
 .fila .msj{grid-column:1/-1!important;width:100%;padding:9px 10px;border:2px solid #d5e4fb;border-radius:10px;color:var(--navy);font:500 13.5px/1.4 "Nunito",sans-serif;resize:vertical}
+#admin .nube{margin-top:16px;padding:14px;border-radius:16px;background:#f1f7ff;border:2px solid #d5e4fb}
+#admin .nube h2{font-family:"Lora",serif;color:var(--navy);font-size:18px}
+#admin input[type=password]{width:100%;padding:9px 10px;border:2px solid #d5e4fb;border-radius:10px;color:var(--navy);font-weight:700;background:#fff}
+.fila .nubeTag{font-size:11.5px;font-weight:800;color:#1f8a4c}
 .fila .est{grid-column:1/-1;font-weight:800;color:#5a6c97;font-size:13px}
 
 /* Botones */
@@ -334,6 +338,20 @@ textarea#salida{width:100%;height:140px;margin-top:10px;border-radius:12px;borde
       <button class="btn" id="aHtml">💾 Descargar invitación actualizada (.html)</button>
       <button class="btn" id="aReset">↩️ Volver a los datos originales</button>
     </div>
+    <div class="nube" id="nube">
+      <h2>☁️ Confirmaciones en línea</h2>
+      <div id="nubeLogin">
+        <p class="nota">Entra con tu usuario de administrador para ver las respuestas que llegan desde las invitaciones.</p>
+        <label for="nEmail">Correo</label><input type="text" id="nEmail" autocomplete="username" inputmode="email">
+        <label for="nPass">Contraseña</label><input type="password" id="nPass" autocomplete="current-password">
+        <div class="barra"><button class="btn prim" id="nEntrar">Entrar</button></div>
+      </div>
+      <div id="nubeOk" class="oculto">
+        <p class="nota" id="nubeInfo"></p>
+        <div class="barra"><button class="btn" id="nActualizar">🔄 Actualizar ahora</button><button class="btn" id="nSalir">Salir</button></div>
+      </div>
+      <p class="nota oculto" id="nubeOff">La conexión con la base de datos aún no está configurada.</p>
+    </div>
     <div class="msg" id="aMsg"></div>
     <p class="nota">Los cambios que hagas aquí se guardan solo en este navegador. Para que los invitados vean los cambios, descarga la invitación actualizada (.html) y vuelve a publicarla. Si el botón de descarga no responde (por ejemplo, dentro de la app de Claude), usa “Copiar tabla”.</p>
     <textarea id="salida" class="oculto" readonly></textarea>
@@ -368,7 +386,9 @@ textarea#salida{width:100%;height:140px;margin-top:10px;border-radius:12px;borde
   "inicioISO": "2026-12-12T17:00:00-05:00",
   "whatsapp": "573214675400",
   "urlPublica": "https://qualiclinicasesores-create.github.io/babyshower-tomas/",
-  "recordatorioISO": "2026-12-09T08:00:00-05:00"
+  "recordatorioISO": "2026-12-09T08:00:00-05:00",
+  "supabaseUrl": "https://ywafpwtgwygprhoxfsup.supabase.co",
+  "supabaseKey": "sb_publishable_u4XmIMIFGoTtWHc3thtbng_g_fYAkQq"
  },
  "regalosDisponibles": [
   "Set de Bodies de algodón (0–3 meses)",
@@ -1008,6 +1028,71 @@ const Voz = (function(){
   return { disponible, puede: f => tieneAudio(f) || disponible, leer, parar, desbloquear, alternar(){ hablando ? parar() : leer(); } };
 })();
 
+/* ---------------- Base de datos (Supabase) ----------------
+   Los invitados solo pueden INSERTAR su respuesta; solo el administrador (con sesión) puede leerlas. */
+const Nube = (function(){
+  const url = ((D.config.supabaseUrl)||"").replace(/\/+$/,""), key = D.config.supabaseKey||"";
+  const on = !!(url && key), SES = "babyshower-tomas-sesion";
+  let sesion = null, timer = null, respuestas = [];
+  try{ sesion = JSON.parse(localStorage.getItem(SES)||"null"); }catch(e){}
+  const guardarSes = s => { sesion = s; try{ s ? localStorage.setItem(SES, JSON.stringify(s)) : localStorage.removeItem(SES); }catch(e){} };
+  function registrar(f, asiste, personas){
+    if(!on || !f) return;
+    try{
+      fetch(url+"/rest/v1/confirmaciones", { method:"POST", keepalive:true,
+        headers: Object.assign({ apikey:key, "Content-Type":"application/json", Prefer:"return=minimal" }, /^eyJ/.test(key) ? { Authorization:"Bearer "+key } : {}),
+        body: JSON.stringify({ slug:f.slug, familia:f.nombre, asiste:!!asiste, personas:+personas||0 }) }).catch(()=>{});
+    }catch(e){}
+  }
+  async function auth(body, tipo){
+    const r = await fetch(url+"/auth/v1/token?grant_type="+tipo, { method:"POST", headers:{ apikey:key, "Content-Type":"application/json" }, body: JSON.stringify(body) });
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(j.error_description || j.msg || "No se pudo iniciar sesión");
+    guardarSes({ access:j.access_token, refresh:j.refresh_token, vence: Date.now() + (j.expires_in||3600)*1000 - 60000, email: j.user && j.user.email });
+  }
+  async function token(){
+    if(!sesion) throw new Error("sin sesión");
+    if(Date.now() > sesion.vence) await auth({ refresh_token: sesion.refresh }, "refresh_token");
+    return sesion.access;
+  }
+  async function leer(){
+    const tk = await token();
+    const r = await fetch(url+"/rest/v1/confirmaciones?select=slug,familia,asiste,personas,creado&order=creado.asc", { headers:{ apikey:key, Authorization:"Bearer "+tk } });
+    if(r.status===401){ guardarSes(null); throw new Error("La sesión expiró, vuelve a entrar"); }
+    if(!r.ok) throw new Error("Error "+r.status+" al leer las confirmaciones");
+    respuestas = await r.json();
+    // la última respuesta de cada familia es la que cuenta
+    const ult = {}; respuestas.forEach(x=>{ ult[x.slug] = x; });
+    D.familias.forEach(f=>{ const x = ult[f.slug]; if(x){ f.estado = x.asiste ? "Confirmado" : "No asiste"; f.confirmados = x.asiste ? x.personas : 0; f._nube = x.creado; } });
+    guardarLocal();
+    return { total: respuestas.length, familias: Object.keys(ult).length };
+  }
+  function pintar(){
+    $("#nubeOff").classList.toggle("oculto", on);
+    $("#nubeLogin").classList.toggle("oculto", !on || !!sesion);
+    $("#nubeOk").classList.toggle("oculto", !on || !sesion);
+  }
+  async function sincronizar(silencio){
+    try{
+      const r = await leer(); pintarAdmin(); pintar();
+      $("#nubeInfo").textContent = "Conectado como "+(sesion.email||"administrador")+" · "+r.familias+" familias han respondido ("+r.total+" respuestas) · actualizado "+new Date().toLocaleTimeString("es-CO",{hour:"2-digit",minute:"2-digit"})+" · se actualiza solo cada minuto";
+      if(!silencio) aviso("Confirmaciones actualizadas ✔");
+    }catch(e){ pintar(); aviso(e.message); }
+  }
+  function iniciarAdmin(){
+    pintar();
+    $("#nEntrar").onclick = async ()=>{
+      try{ await auth({ email: $("#nEmail").value.trim(), password: $("#nPass").value }, "password"); $("#nPass").value=""; pintar(); await sincronizar(); }
+      catch(e){ aviso(e.message==="Invalid login credentials" ? "Correo o contraseña incorrectos" : e.message); }
+    };
+    $("#nActualizar").onclick = ()=>sincronizar();
+    $("#nSalir").onclick = ()=>{ guardarSes(null); clearInterval(timer); pintar(); aviso("Sesión cerrada"); };
+    if(on && sesion) sincronizar(true);
+    clearInterval(timer); timer = setInterval(()=>{ if(on && sesion && !$("#admin").classList.contains("oculto")) sincronizar(true); }, 60000);
+  }
+  return { on, registrar, iniciarAdmin, get respuestas(){ return respuestas; } };
+})();
+
 /* ---------------- Confirmación de asistencia ---------------- */
 const CONF = "babyshower-tomas-conf";
 function leerConf(){ try{ return JSON.parse(localStorage.getItem(CONF)||"{}"); }catch(e){ return {}; } }
@@ -1039,7 +1124,7 @@ function abrirConfirmar(){
   };
   $("#cMenos").onclick = ()=>{ if(n>1){ n--; pinta(); } };
   $("#cMas").onclick = ()=>{ if(n<max){ n++; pinta(); } };
-  const marcar = asiste => ()=>{ const o=leerConf(); o[actual.slug]={asiste, n: asiste?n:0, fecha:new Date().toISOString()}; guardarConf(o); setTimeout(()=>{ cerrarModal(); pintarConfirmacion(); },300); };
+  const marcar = asiste => ()=>{ Nube.registrar(actual, asiste, asiste?n:0); const o=leerConf(); o[actual.slug]={asiste, n: asiste?n:0, fecha:new Date().toISOString()}; guardarConf(o); setTimeout(()=>{ cerrarModal(); pintarConfirmacion(); },300); };
   $("#cSi").addEventListener("click", marcar(true)); $("#cNo").addEventListener("click", marcar(false));
   pinta();
 }
@@ -1139,6 +1224,7 @@ function pintarAdmin(){
       '<div class="ops"><button data-a="copiar">🔗 Copiar enlace</button><a class="wa" target="_blank" rel="noopener" href="https://wa.me/?text='+encodeURIComponent(msg)+'">WhatsApp</a>'+
       '<a class="rec" target="_blank" rel="noopener" href="https://wa.me/?text='+encodeURIComponent(recMsg)+'">🔔 Recordatorio</a><a href="#'+esc(f.slug)+'">👀 Ver</a><button data-a="dado">🎲</button><button class="del" data-a="borrar">✕</button></div>'+
       '<div class="est"><select data-k="estado" aria-label="Estado">'+["Pendiente","Confirmado","No asiste"].map(o=>'<option'+(o===est?' selected':'')+'>'+o+'</option>').join("")+'</select>'+
+        (f._nube ? ' <span class="nubeTag">☁️ respondió el '+new Date(f._nube).toLocaleDateString("es-CO",{day:"numeric",month:"short"})+'</span>' : '')+
         (est==="Confirmado" ? ' <label style="display:inline;margin:0">asisten <input type="number" min="0" max="30" data-k="confirmados" value="'+esc(f.confirmados||f.personas)+'" style="width:70px;display:inline-block"></label>' : '')+'</div>'+
       (f.notas ? '<div class="avis">⚠️ '+esc(f.notas)+'</div>' : '')+
       '<div class="link">'+esc(enlace(f))+'</div></div>';
@@ -1171,6 +1257,7 @@ function enlazarAdmin(){
       const wb = XLSX.utils.book_new(), ws = XLSX.utils.json_to_sheet(filas());
       ws["!cols"] = [{wch:4},{wch:34},{wch:10},{wch:42},{wch:40},{wch:30},{wch:60}];
       XLSX.utils.book_append_sheet(wb, ws, "Invitados y regalos");
+      if(Nube.respuestas.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(Nube.respuestas.map(x=>({"Fecha":new Date(x.creado).toLocaleString("es-CO"),"Familia":x.familia,"Respuesta":x.asiste?"Asiste":"No asiste","Personas":x.personas,"Código":x.slug}))), "Respuestas recibidas");
       XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([["Regalos disponibles"]].concat(D.regalosDisponibles.map(r=>[r]))), "Lista de regalos");
       const out = XLSX.write(wb,{bookType:"xlsx",type:"array"});
       descargar(new Blob([out],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}),"Baby_Shower_Invitados_Regalos.xlsx");
@@ -1242,7 +1329,7 @@ function ruta(){
   if(h==="admin"){
     cargarLocal(); asegurarSlugs();
     $("#vistaInvitacion").classList.add("oculto"); $("#portada").classList.add("fuera"); $("#admin").classList.remove("oculto");
-    if(!adminListo){ enlazarAdmin(); adminListo=true; } pintarAdmin(); return;
+    if(!adminListo){ enlazarAdmin(); adminListo=true; } pintarAdmin(); Nube.iniciarAdmin(); return;
   }
   $("#admin").classList.add("oculto"); $("#vistaInvitacion").classList.remove("oculto");
   const f = D.familias.find(x=>x.slug===h) || null;
